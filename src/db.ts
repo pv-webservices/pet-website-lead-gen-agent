@@ -144,6 +144,75 @@ export function getAllLeads(): Lead[] {
     .all() as unknown as Lead[];
 }
 
+// ─── outreach_messages ────────────────────────────────────────────────────────
+
+export interface OutreachMessageInsert {
+  lead_id:      number;
+  channel:      'whatsapp' | 'email';
+  subject:      string | null;
+  message_text: string;
+}
+
+/** Scored leads (status='scored'), ordered by score desc, up to limit. */
+export function getScoredLeads(limit: number): Lead[] {
+  return getDb().prepare(`
+    SELECT * FROM leads
+    WHERE status = 'scored'
+    ORDER BY score DESC
+    LIMIT @limit
+  `).all({ limit } as unknown as SqlParams) as unknown as Lead[];
+}
+
+/** IDs of leads that already have at least one outreach message. */
+export function getLeadsWithOutreachIds(): Set<number> {
+  const rows = getDb().prepare(
+    'SELECT DISTINCT lead_id FROM outreach_messages',
+  ).all() as Array<{ lead_id: number }>;
+  return new Set(rows.map(r => r.lead_id));
+}
+
+/** Insert a single outreach message row. */
+export function insertOutreachMessage(row: OutreachMessageInsert): void {
+  getDb().prepare(`
+    INSERT INTO outreach_messages (lead_id, channel, subject, message_text)
+    VALUES (@lead_id, @channel, @subject, @message_text)
+  `).run(row as unknown as SqlParams);
+}
+
+/** Join leads with their latest whatsapp + email outreach messages. */
+export function getLeadsWithLatestOutreach(): Array<Lead & {
+  whatsapp_text: string | null;
+  email_subject: string | null;
+  email_body:    string | null;
+}> {
+  return getDb().prepare(`
+    SELECT l.*,
+      wa.message_text AS whatsapp_text,
+      em.subject      AS email_subject,
+      em.message_text AS email_body
+    FROM leads l
+    LEFT JOIN outreach_messages wa
+      ON wa.lead_id = l.id AND wa.channel = 'whatsapp'
+      AND wa.id = (
+        SELECT MAX(id) FROM outreach_messages
+        WHERE lead_id = l.id AND channel = 'whatsapp'
+      )
+    LEFT JOIN outreach_messages em
+      ON em.lead_id = l.id AND em.channel = 'email'
+      AND em.id = (
+        SELECT MAX(id) FROM outreach_messages
+        WHERE lead_id = l.id AND channel = 'email'
+      )
+    ORDER BY l.score DESC
+  `).all() as unknown as Array<Lead & {
+    whatsapp_text: string | null;
+    email_subject: string | null;
+    email_body:    string | null;
+  }>;
+}
+
+// ─── Stats ────────────────────────────────────────────────────────────────────
+
 export function getLeadStats(): {
   total: number; new: number; scored: number; outreach_ready: number;
 } {

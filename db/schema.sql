@@ -36,3 +36,14 @@ CREATE INDEX IF NOT EXISTS idx_leads_place_id ON leads(place_id);
 CREATE INDEX IF NOT EXISTS idx_leads_status   ON leads(status);
 CREATE INDEX IF NOT EXISTS idx_leads_score    ON leads(score DESC);
 CREATE INDEX IF NOT EXISTS idx_leads_niche    ON leads(niche);
+
+CREATE TABLE IF NOT EXISTS outreach_messages (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  lead_id      INTEGER NOT NULL REFERENCES leads(id),
+  channel      TEXT    NOT NULL CHECK(channel IN ('whatsapp', 'email')),
+  subject      TEXT,
+  message_text TEXT    NOT NULL,
+  created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_om_lead_id ON outreach_messages(lead_id);

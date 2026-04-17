@@ -3,20 +3,24 @@
   "version": "1.0.0",
   "description": "Google Maps lead-gen agent for Pet Groomers & Vet Clinics in Delhi NCR",
   "scripts": {
-    "db:init":  "tsx scripts/db_init.ts",
-    "scrape":   "tsx scripts/scrape_batch2.ts",
-    "score":    "tsx scripts/score_leads.ts",
-    "outreach": "tsx scripts/generate_outreach.ts",
-    "build":    "tsc"
+    "db:init":           "tsx scripts/db_init.ts",
+    "scrape":            "tsx scripts/scrape_batch2.ts",
+    "score":             "tsx scripts/score_leads.ts",
+    "outreach":          "tsx scripts/generate_outreach.ts",
+    "export:leads":      "tsx scripts/export_leads_to_file.ts",
+    "outreach:generate": "tsx scripts/generate_outreach_for_leads.ts",
+    "sheet:push":        "tsx scripts/push_to_google_sheet.ts",
+    "build":             "tsc"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
-    "apify-client":      "^2.9.3",
-    "dotenv":            "^16.4.5"
+    "apify-client": "^2.9.3",
+    "dotenv": "^16.4.5",
+    "googleapis": "^171.4.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsx":         "^4.15.0",
-    "typescript":  "^5.5.0"
+    "tsx": "^4.15.0",
+    "typescript": "^5.5.0"
   }
 }

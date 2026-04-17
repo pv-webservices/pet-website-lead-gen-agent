@@ -96,6 +96,15 @@ export interface ScoredLead extends ScoringInput {
 
 export type BusinessCategory = 'groomer' | 'vet' | 'unknown';
 
+export interface OutreachMessage {
+  id:           number;
+  lead_id:      number;
+  channel:      'whatsapp' | 'email';
+  subject:      string | null;
+  message_text: string;
+  created_at:   string;
+}
+
 export interface OutreachContext {
   lead:     Lead;
   category: BusinessCategory;
