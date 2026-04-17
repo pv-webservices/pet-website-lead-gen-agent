@@ -4,6 +4,7 @@ export interface ApifyPlaceResult {
   placeId:      string;
   title:        string;
   address:      string | null;
+  city:         string | null;
   phone:        string | null;
   rating:       number | null;
   reviewsCount: number | null;
@@ -24,13 +25,17 @@ export interface Lead {
   place_id:         string;
   name:             string;
   address:          string | null;
-  phone:            string | null;
+  city:             string | null;
+  lat:              number | null;
+  lng:              number | null;
   rating:           number | null;
   review_count:     number | null;
-  categories:       string | null;   // JSON-serialised string[]
-  website:          string | null;
-  source_keyword:   string;
-  score:            number | null;
+  website_url:      string | null;
+  phone:            string | null;
+  niche:            string;
+  batch_keyword:    string;
+  score:            number;
+  tier:             string | null;
   outreach_message: string | null;
   status:           LeadStatus;
   created_at:       string;
@@ -49,12 +54,13 @@ export type LeadStatus =
 
 export type InsertLeadPayload = Omit<
   Lead,
-  'id' | 'score' | 'outreach_message' | 'status' | 'created_at' | 'updated_at'
+  'id' | 'score' | 'tier' | 'outreach_message' | 'status' | 'created_at' | 'updated_at'
 >;
 
 export interface ScoreUpdatePayload {
   place_id: string;
   score:    number;
+  tier:     string | null;
   status:   'scored';
 }
 
@@ -71,12 +77,13 @@ export interface ScoringInput {
   name:         string;
   rating:       number | null;
   review_count: number | null;
-  website:      string | null;
-  categories:   string | null;
+  website_url:  string | null;
+  niche:        string;
 }
 
 export interface ScoredLead extends ScoringInput {
   score:           number;
+  tier:            string;
   score_breakdown: {
     rating_score:     number;
     review_score:     number;

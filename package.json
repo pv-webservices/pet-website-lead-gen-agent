@@ -10,8 +10,9 @@
     "build":    "tsc"
   },
   "dependencies": {
-    "apify-client": "^2.9.3",
-    "dotenv":       "^16.4.5"
+    "@anthropic-ai/sdk": "^0.52.0",
+    "apify-client":      "^2.9.3",
+    "dotenv":            "^16.4.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

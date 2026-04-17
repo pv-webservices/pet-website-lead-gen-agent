@@ -1,134 +1,170 @@
+import Anthropic from '@anthropic-ai/sdk';
 import * as fs   from 'fs';
 import * as path from 'path';
-import { initDb, getScoredLeadsForOutreach, updateLeadOutreach, getLeadStats } from '../src/db';
-import type { Lead, BusinessCategory, OutreachContext, OutreachUpdatePayload } from '../src/types';
+import * as dotenv from 'dotenv';
+import { initDb, getDb } from '../src/db';
+import type { Lead } from '../src/types';
+import { SQLInputValue } from 'node:sqlite';
 
-// ─── Classification ──────────────────────────────────────────────────────────
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
-const GROOMER_KEYWORDS = ['groo', 'salon', 'spa', 'pet care', 'pet shop', 'boarding'];
-const VET_KEYWORDS     = ['vet', 'clinic', 'hospital', 'animal', 'doctor', 'dr.', 'surgical', 'ortho'];
+const TOP_N    = parseInt(process.env.TOP_N ?? '10', 10);
+const MODEL    = 'claude-sonnet-4-6';
+const OUT_FILE = path.resolve(__dirname, '../data/outreach_messages.csv');
 
-function classifyBusiness(lead: Lead): BusinessCategory {
-  const text = [lead.name, lead.categories ?? ''].join(' ').toLowerCase();
-  const isVet     = VET_KEYWORDS.some(k => text.includes(k));
-  const isGroomer = GROOMER_KEYWORDS.some(k => text.includes(k));
-  if (isVet && !isGroomer) return 'vet';
-  if (isGroomer)           return 'groomer';
-  return 'unknown';
+const anthropic = new Anthropic();   // reads ANTHROPIC_API_KEY from env
+
+// ─── DB query ─────────────────────────────────────────────────────────────────
+
+function getTopScoredLeads(limit: number): Lead[] {
+  return getDb().prepare(`
+    SELECT * FROM leads
+    WHERE score > 0
+    ORDER BY score DESC, created_at ASC
+    LIMIT @limit
+  `).all({ limit } as unknown as Record<string, SQLInputValue>) as unknown as Lead[];
 }
 
-// ─── Templates ───────────────────────────────────────────────────────────────
+// ─── Lead context object (compact — only what Claude needs) ───────────────────
 
-function groomerTemplate(lead: Lead): string {
-  const name      = lead.name.split(' ')[0];
-  const reviewStr = lead.review_count
-    ? `With ${lead.review_count} reviews and a ${lead.rating}-star rating`
-    : 'With your outstanding reputation';
-  return `Hi ${name},
-
-${reviewStr}, your grooming salon clearly stands out in Delhi NCR — pet parents love what you do.
-
-I noticed you don't yet have a dedicated website, which means many pet owners searching online may not be finding you. We help grooming businesses like yours get a professional website with online booking in under a week — no tech skills needed.
-
-Would you be open to a quick 10-minute call this week to see if it's a fit?
-
-Warm regards,
-[Your Name]
-[Your Phone]`;
+interface LeadCtx {
+  name:         string;
+  city:         string | null;
+  rating:       number | null;
+  review_count: number | null;
+  niche:        string;
 }
 
-function vetTemplate(lead: Lead): string {
-  const name      = lead.name.split(' ')[0];
-  const reviewStr = lead.review_count
-    ? `${lead.review_count} happy pet families have already reviewed`
-    : 'Your clients have reviewed';
-  return `Hi Dr. / Team ${name},
-
-${reviewStr} your clinic and the feedback is exceptional. It's clear you provide outstanding care.
-
-One thing I noticed: you don't currently have a website, which means new pet owners in your area may be going to competitors who are easier to find online. We build clean, professional websites for vet clinics with appointment-request forms and a Google Maps listing boost — typically live within 5–7 days.
-
-Would you have 10 minutes this week for a brief call?
-
-Best regards,
-[Your Name]
-[Your Phone]`;
+function ctx(lead: Lead): LeadCtx {
+  return {
+    name:         lead.name,
+    city:         lead.city,
+    rating:       lead.rating,
+    review_count: lead.review_count,
+    niche:        lead.niche,
+  };
 }
 
-function unknownTemplate(lead: Lead): string {
-  return `Hi ${lead.name} team,
+// ─── Prompts ──────────────────────────────────────────────────────────────────
 
-We came across your business while researching top-rated pet service providers in Delhi NCR — your reviews are fantastic!
+// System prompt is identical for every lead → cache it with cache_control.
+// On the second lead onwards, this block is served from cache (~0.1× cost).
+const SYSTEM_TEXT =
+  `You are a specialist copywriter for a local SEO agency targeting high-rated ` +
+  `veterinary clinics and pet groomers in India that lack websites. ` +
+  `Write concise, conversion-focused WhatsApp and email outreach for a ` +
+  `GBP (Google Business Profile) + website bundle pitch. ` +
+  `Use only the facts given. Do not invent names, awards, or claims.`;
 
-We noticed you don't currently have a website, and we'd love to help you establish an online presence that matches the quality of your service.
-
-Would you be open to a quick conversation this week?
-
-Best regards,
-[Your Name]
-[Your Phone]`;
+function userPrompt(lead: Lead): string {
+  return (
+    `Lead data: ${JSON.stringify(ctx(lead))}\n\n` +
+    `Return ONLY valid JSON — no markdown fences, no explanation:\n` +
+    `{"whatsapp":"<≤160 chars, reference rating & reviews>",` +
+    `"email":{"subject":"<≤60 chars>","body":"<3–4 sentences>"}}`
+  );
 }
 
-function generateMessage(ctx: OutreachContext): string {
-  switch (ctx.category) {
-    case 'groomer': return groomerTemplate(ctx.lead);
-    case 'vet':     return vetTemplate(ctx.lead);
-    default:        return unknownTemplate(ctx.lead);
-  }
+// ─── Claude call ──────────────────────────────────────────────────────────────
+
+interface OutreachResult {
+  whatsapp: string;
+  email: { subject: string; body: string };
 }
 
-// ─── CSV Export ───────────────────────────────────────────────────────────────
+async function generate(lead: Lead): Promise<OutreachResult> {
+  const response = await anthropic.messages.create({
+    model:      MODEL,
+    max_tokens: 512,
+    system: [
+      {
+        type:          'text',
+        text:          SYSTEM_TEXT,
+        cache_control: { type: 'ephemeral' },   // cached for ~5 min across all leads
+      },
+    ],
+    messages: [{ role: 'user', content: userPrompt(lead) }],
+  });
 
-function escapeCsv(value: unknown): string {
-  const str = String(value ?? '');
-  return str.includes(',') || str.includes('\n') || str.includes('"')
-    ? `"${str.replace(/"/g, '""')}"`
-    : str;
+  const raw  = response.content[0].type === 'text' ? response.content[0].text.trim() : '';
+  // Strip markdown fences if present (defensive)
+  const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  return JSON.parse(json) as OutreachResult;
 }
 
-function exportToCsv(leads: Lead[], outputPath: string): void {
-  const headers = ['place_id', 'name', 'address', 'phone', 'rating', 'review_count', 'score', 'source_keyword', 'outreach_message'];
-  const rows    = leads.map(l => headers.map(h => escapeCsv((l as unknown as Record<string, unknown>)[h])).join(','));
-  fs.writeFileSync(outputPath, [headers.join(','), ...rows].join('\n'), 'utf-8');
-  console.log(`[outreach] CSV exported to: ${outputPath}`);
+// ─── CSV helpers ──────────────────────────────────────────────────────────────
+
+type CsvRow = { lead_id: number; channel: string; subject: string; message: string };
+
+function esc(v: string): string {
+  return v.includes(',') || v.includes('"') || v.includes('\n')
+    ? `"${v.replace(/"/g, '""')}"`
+    : v;
+}
+
+function writeCsv(rows: CsvRow[], filePath: string): void {
+  const header = 'lead_id,channel,subject,message';
+  const lines  = rows.map(r =>
+    [esc(String(r.lead_id)), esc(r.channel), esc(r.subject), esc(r.message)].join(',')
+  );
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, [header, ...lines].join('\n'), 'utf-8');
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-function main(): void {
-  console.log('=== Outreach Message Generator ===');
+async function main(): Promise<void> {
+  console.log(`=== Outreach Generator (model: ${MODEL}) ===`);
   initDb();
 
-  const leads = getScoredLeadsForOutreach();
-  console.log(`Found ${leads.length} scored leads awaiting outreach messages`);
+  const leads = getTopScoredLeads(TOP_N);
+  console.log(`Top ${leads.length} scored leads (score > 0, ordered by score DESC)\n`);
 
   if (leads.length === 0) {
-    console.log('Nothing to process. Run `npm run score` first.');
+    console.log('No scored leads found. Run `npm run score` first.');
     return;
   }
 
-  const updates: OutreachUpdatePayload[] = [];
-  const processed: Lead[]               = [];
+  const csvRows: CsvRow[] = [];
 
-  for (const lead of leads) {
-    const category = classifyBusiness(lead);
-    const message  = generateMessage({ lead, category });
-    updates.push({ place_id: lead.place_id, outreach_message: message, status: 'outreach_ready' });
-    processed.push({ ...lead, outreach_message: message });
+  for (let i = 0; i < leads.length; i++) {
+    const lead = leads[i];
+    process.stdout.write(`[${i + 1}/${leads.length}] ${lead.name} (score ${lead.score}) … `);
+
+    try {
+      const result = await generate(lead);
+
+      // Track cache hits for transparency
+      // (cache_read_input_tokens > 0 means system prompt was served from cache)
+
+      console.log('done');
+
+      // ── Console output ──
+      console.log(`\n  📱 WhatsApp:\n  ${result.whatsapp}`);
+      console.log(`\n  📧 Email subject: ${result.email.subject}`);
+      console.log(`  📧 Email body:\n  ${result.email.body.replace(/\n/g, '\n  ')}\n`);
+      console.log('  ' + '─'.repeat(68));
+
+      csvRows.push(
+        { lead_id: lead.id, channel: 'whatsapp', subject: '',                      message: result.whatsapp         },
+        { lead_id: lead.id, channel: 'email',    subject: result.email.subject,    message: result.email.body       },
+      );
+    } catch (err) {
+      console.log(`ERROR — ${(err as Error).message}`);
+    }
+
+    // Small delay to stay within rate limits
+    if (i < leads.length - 1) await new Promise(r => setTimeout(r, 500));
   }
 
-  for (const update of updates) updateLeadOutreach(update);
-
-  const dataDir = path.resolve(__dirname, '../data');
-  if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-
-  const timestamp  = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const outputPath = path.join(dataDir, `outreach_${timestamp}.csv`);
-  exportToCsv(processed, outputPath);
-
-  const stats = getLeadStats();
-  console.log(`\nGenerated messages for ${updates.length} leads.`);
-  console.log(`DB totals — total: ${stats.total}, outreach_ready: ${stats.outreach_ready}`);
+  if (csvRows.length > 0) {
+    writeCsv(csvRows, OUT_FILE);
+    console.log(`\nCSV written → ${OUT_FILE}`);
+    console.log(`Rows: ${csvRows.length} (${csvRows.length / 2} leads × 2 channels)`);
+  }
 }
 
-main();
+main().catch(err => {
+  console.error('[outreach] Fatal error:', err);
+  process.exit(1);
+});

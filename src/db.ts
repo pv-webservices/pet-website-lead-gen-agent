@@ -1,7 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import * as fs from 'fs';
-
-type SqlParams = Record<string, SQLInputValue>;
 import { DB_PATH, SCHEMA_PATH } from './config';
 import type {
   Lead,
@@ -11,6 +9,8 @@ import type {
   ScoringInput,
 } from './types';
 
+type SqlParams = Record<string, SQLInputValue>;
+
 // ─── Singleton Connection ────────────────────────────────────────────────────
 
 let _db: DatabaseSync | null = null;
@@ -18,13 +18,13 @@ let _db: DatabaseSync | null = null;
 export function getDb(): DatabaseSync {
   if (!_db) {
     _db = new DatabaseSync(DB_PATH);
-    _db.exec("PRAGMA journal_mode = WAL");
-    _db.exec("PRAGMA foreign_keys = ON");
+    _db.exec('PRAGMA journal_mode = WAL');
+    _db.exec('PRAGMA foreign_keys = ON');
   }
   return _db;
 }
 
-// ─── Initialisation ──────────────────────────────────────────────────────────
+// ─── Migrations ───────────────────────────────────────────────────────────────
 
 export function initDb(): void {
   const db     = getDb();
@@ -33,17 +33,24 @@ export function initDb(): void {
   console.log(`[db] Initialised database at: ${DB_PATH}`);
 }
 
-// ─── Insert ──────────────────────────────────────────────────────────────────
+// ─── Insert ───────────────────────────────────────────────────────────────────
 
 const INSERT_SQL = `
   INSERT OR IGNORE INTO leads
-    (place_id, name, address, phone, rating, review_count,
-     categories, website, source_keyword)
+    (place_id, name, address, city, lat, lng, rating, review_count,
+     website_url, phone, niche, batch_keyword)
   VALUES
-    (@place_id, @name, @address, @phone, @rating, @review_count,
-     @categories, @website, @source_keyword)
+    (@place_id, @name, @address, @city, @lat, @lng, @rating, @review_count,
+     @website_url, @phone, @niche, @batch_keyword)
 `;
 
+/** Insert a single lead, silently skipping if place_id already exists. */
+export function insertOrIgnoreLead(payload: InsertLeadPayload): boolean {
+  const result = getDb().prepare(INSERT_SQL).run(payload as unknown as SqlParams);
+  return (result.changes as number) > 0;
+}
+
+/** Batch insert — all in one transaction. Returns count of newly inserted rows. */
 export function insertLeadsBatch(payloads: InsertLeadPayload[]): number {
   const db   = getDb();
   const stmt = db.prepare(INSERT_SQL);
@@ -51,8 +58,7 @@ export function insertLeadsBatch(payloads: InsertLeadPayload[]): number {
   db.exec('BEGIN');
   try {
     for (const p of payloads) {
-      const result = stmt.run(p as unknown as SqlParams);
-      inserted += result.changes as number;
+      inserted += (stmt.run(p as unknown as SqlParams).changes as number);
     }
     db.exec('COMMIT');
   } catch (err) {
@@ -62,21 +68,36 @@ export function insertLeadsBatch(payloads: InsertLeadPayload[]): number {
   return inserted;
 }
 
-// ─── Score ───────────────────────────────────────────────────────────────────
+// ─── Score ────────────────────────────────────────────────────────────────────
 
+/** All leads that haven't been scored yet (score = 0, status = 'new'). */
 export function getUnscoredLeads(): ScoringInput[] {
   return getDb().prepare(`
-    SELECT place_id, name, rating, review_count, website, categories
+    SELECT place_id, name, rating, review_count, website_url, niche
     FROM leads
-    WHERE score IS NULL
+    WHERE status = 'new'
     ORDER BY review_count DESC
   `).all() as unknown as ScoringInput[];
 }
 
+/** Update score, tier, and status for a single lead. */
+export function updateLeadScore(
+  place_id: string,
+  score:    number,
+  tier:     string | null = null,
+): void {
+  getDb().prepare(`
+    UPDATE leads
+    SET score = @score, tier = @tier, status = 'scored'
+    WHERE place_id = @place_id
+  `).run({ score, tier, place_id } as unknown as SqlParams);
+}
+
+/** Batch score update — all in one transaction. */
 export function updateLeadScoresBatch(payloads: ScoreUpdatePayload[]): void {
   const db   = getDb();
   const stmt = db.prepare(`
-    UPDATE leads SET score = @score, status = @status
+    UPDATE leads SET score = @score, tier = @tier, status = @status
     WHERE place_id = @place_id
   `);
   db.exec('BEGIN');
@@ -89,7 +110,7 @@ export function updateLeadScoresBatch(payloads: ScoreUpdatePayload[]): void {
   }
 }
 
-// ─── Outreach ────────────────────────────────────────────────────────────────
+// ─── Outreach ─────────────────────────────────────────────────────────────────
 
 export function getScoredLeadsForOutreach(): Lead[] {
   return getDb().prepare(`
@@ -109,10 +130,18 @@ export function updateLeadOutreach(payload: OutreachUpdatePayload): void {
 
 // ─── Queries ─────────────────────────────────────────────────────────────────
 
-export function getAllLeads(): Lead[] {
+/** Top leads ordered by score descending. */
+export function getTopLeads(limit: number): Lead[] {
   return getDb().prepare(`
-    SELECT * FROM leads ORDER BY score DESC
-  `).all() as unknown as Lead[];
+    SELECT * FROM leads
+    ORDER BY score DESC
+    LIMIT @limit
+  `).all({ limit } as unknown as SqlParams) as unknown as Lead[];
+}
+
+export function getAllLeads(): Lead[] {
+  return getDb().prepare('SELECT * FROM leads ORDER BY score DESC')
+    .all() as unknown as Lead[];
 }
 
 export function getLeadStats(): {

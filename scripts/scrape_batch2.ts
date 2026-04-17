@@ -1,49 +1,60 @@
 import { ApifyClient } from 'apify-client';
-import {
-  APIFY_TOKEN,
-  ACTOR_ID,
-  KEYWORDS,
-  DELHI_NCR_LOCATION,
-  MAX_PLACES_PER_SEARCH,
-  MIN_RATING,
-  MIN_REVIEWS,
-} from '../src/config';
-import { initDb, insertLeadsBatch, getLeadStats } from '../src/db';
+import { APIFY_TOKEN, ACTOR_ID, DELHI_NCR_LOCATION, MAX_PLACES_PER_SEARCH } from '../src/config';
+import { initDb, insertOrIgnoreLead, getLeadStats } from '../src/db';
 import type { ApifyPlaceResult, InsertLeadPayload } from '../src/types';
+
+// ─── Vet-specific queries for Delhi NCR ─────────────────────────────────────
+
+const VET_QUERIES: string[] = [
+  'veterinary clinic South Delhi',
+  'vet clinic South Delhi',
+  'animal hospital South Delhi',
+  'pet clinic South Delhi',
+  'veterinary doctor Delhi',
+];
+
+const MIN_RATING  = 4.5;
+const MIN_REVIEWS = 100;
+
+// ─── Apify client ────────────────────────────────────────────────────────────
 
 const client = new ApifyClient({ token: APIFY_TOKEN });
 
-function passesQualityFilter(place: ApifyPlaceResult): boolean {
+// ─── Filter ──────────────────────────────────────────────────────────────────
+
+function passesFilter(place: ApifyPlaceResult): boolean {
   const rating      = place.rating       ?? 0;
-  const reviewCount = place.reviewsCount ?? 0;
-  const hasNoWebsite = !place.website || place.website.trim() === '';
-  return rating >= MIN_RATING && reviewCount >= MIN_REVIEWS && hasNoWebsite;
+  const reviewCount = place.reviewsCount ?? 0;   // user_ratings_total in Maps API
+  const noWebsite   = !place.website || place.website.trim() === '';
+  return rating >= MIN_RATING && reviewCount >= MIN_REVIEWS && noWebsite;
 }
 
-function toInsertPayload(place: ApifyPlaceResult, keyword: string): InsertLeadPayload {
-  const cats: string[] = place.categories?.length
-    ? place.categories
-    : place.categoryName
-      ? [place.categoryName]
-      : [];
+// ─── Transform ───────────────────────────────────────────────────────────────
+
+function toPayload(place: ApifyPlaceResult, query: string): InsertLeadPayload {
   return {
-    place_id:       place.placeId,
-    name:           place.title,
-    address:        place.address        ?? null,
-    phone:          place.phone          ?? null,
-    rating:         place.rating         ?? null,
-    review_count:   place.reviewsCount   ?? null,
-    categories:     JSON.stringify(cats),
-    website:        place.website        ?? null,
-    source_keyword: keyword,
+    place_id:      place.placeId,
+    name:          place.title,
+    address:       place.address       ?? null,
+    city:          place.city          ?? null,
+    lat:           place.location?.lat ?? null,
+    lng:           place.location?.lng ?? null,
+    rating:        place.rating        ?? null,
+    review_count:  place.reviewsCount  ?? null,
+    website_url:   null,                          // only no-website leads reach here
+    phone:         place.phone         ?? null,
+    niche:         'vet',
+    batch_keyword: query,
   };
 }
 
-async function scrapeKeyword(keyword: string): Promise<number> {
-  console.log(`\n[scrape] Running actor for keyword: "${keyword}"`);
+// ─── Per-query scrape ────────────────────────────────────────────────────────
+
+async function scrapeQuery(query: string): Promise<{ fetched: number; inserted: number }> {
+  console.log(`\n[scrape] "${query}"`);
 
   const run = await client.actor(ACTOR_ID).call({
-    searchStringsArray:        [keyword],
+    searchStringsArray:        [query],
     locationQuery:             DELHI_NCR_LOCATION,
     maxCrawledPlacesPerSearch: MAX_PLACES_PER_SEARCH,
     language:                  'en',
@@ -58,41 +69,49 @@ async function scrapeKeyword(keyword: string): Promise<number> {
 
   const { items } = await client.dataset(run.defaultDatasetId).listItems();
   const places    = items as unknown as ApifyPlaceResult[];
-  console.log(`[scrape]   Retrieved ${places.length} raw results`);
+  console.log(`         fetched: ${places.length}`);
 
-  const qualified = places.filter(passesQualityFilter);
-  console.log(`[scrape]   ${qualified.length} pass filter (rating≥${MIN_RATING}, reviews≥${MIN_REVIEWS}, no website)`);
+  const qualified = places.filter(passesFilter);
+  console.log(`         qualified (rating≥${MIN_RATING}, reviews≥${MIN_REVIEWS}, no website): ${qualified.length}`);
 
-  if (qualified.length === 0) return 0;
+  let inserted = 0;
+  for (const place of qualified) {
+    if (insertOrIgnoreLead(toPayload(place, query))) inserted++;
+  }
+  console.log(`         inserted: ${inserted}  (${qualified.length - inserted} duplicates skipped)`);
 
-  const payloads = qualified.map(p => toInsertPayload(p, keyword));
-  const inserted = insertLeadsBatch(payloads);
-  console.log(`[scrape]   ${inserted} new leads inserted (${qualified.length - inserted} duplicates skipped)`);
-  return inserted;
+  return { fetched: places.length, inserted };
 }
 
+// ─── Main ────────────────────────────────────────────────────────────────────
+
 async function main(): Promise<void> {
-  console.log('=== Pet Lead Gen Scraper — Delhi NCR ===');
-  console.log(`Filters: rating ≥ ${MIN_RATING}, reviews ≥ ${MIN_REVIEWS}, no website`);
-  console.log(`Keywords: ${KEYWORDS.length}`);
+  console.log('=== Vet Clinic Scraper — Delhi NCR (batch 2) ===');
+  console.log(`Queries: ${VET_QUERIES.length}`);
+  console.log(`Filters: rating ≥ ${MIN_RATING} | reviews ≥ ${MIN_REVIEWS} | no website\n`);
 
   initDb();
 
+  let totalFetched  = 0;
   let totalInserted = 0;
 
-  for (const keyword of KEYWORDS) {
+  for (const query of VET_QUERIES) {
     try {
-      totalInserted += await scrapeKeyword(keyword);
+      const { fetched, inserted } = await scrapeQuery(query);
+      totalFetched  += fetched;
+      totalInserted += inserted;
+      // Polite delay between actor runs
       await new Promise(r => setTimeout(r, 2000));
     } catch (err) {
-      console.error(`[scrape] ERROR for keyword "${keyword}":`, err);
+      console.error(`[scrape] ERROR on query "${query}":`, err);
     }
   }
 
   const stats = getLeadStats();
-  console.log('\n=== Scrape Complete ===');
-  console.log(`New leads inserted this run: ${totalInserted}`);
-  console.log(`DB totals — total: ${stats.total}, new: ${stats.new}, scored: ${stats.scored}`);
+  console.log('\n=== Done ===');
+  console.log(`Raw results fetched : ${totalFetched}`);
+  console.log(`New leads inserted  : ${totalInserted}`);
+  console.log(`DB totals — total: ${stats.total} | new: ${stats.new} | scored: ${stats.scored}`);
 }
 
 main().catch(err => {
