@@ -1,20 +1,21 @@
-import Anthropic from '@anthropic-ai/sdk';
-import * as fs   from 'fs';
+import * as fs from 'fs';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
-import { initDb, getDb } from '../src/db';
-import type { Lead } from '../src/types';
 import { SQLInputValue } from 'node:sqlite';
+import { initDb, getDb } from '../src/db';
+import type { Lead, BusinessCategory } from '../src/types';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
-const TOP_N    = parseInt(process.env.TOP_N ?? '10', 10);
-const MODEL    = 'claude-sonnet-4-6';
+const TOP_N = parseInt(process.env.TOP_N ?? '10', 10);
 const OUT_FILE = path.resolve(__dirname, '../data/outreach_messages.csv');
 
-const anthropic = new Anthropic();   // reads ANTHROPIC_API_KEY from env
+type CsvRow = { lead_id: number; channel: string; subject: string; message: string };
 
-// ─── DB query ─────────────────────────────────────────────────────────────────
+interface OutreachResult {
+  whatsapp: string;
+  email: { subject: string; body: string };
+}
 
 function getTopScoredLeads(limit: number): Lead[] {
   return getDb().prepare(`
@@ -25,96 +26,95 @@ function getTopScoredLeads(limit: number): Lead[] {
   `).all({ limit } as unknown as Record<string, SQLInputValue>) as unknown as Lead[];
 }
 
-// ─── Lead context object (compact — only what Claude needs) ───────────────────
-
-interface LeadCtx {
-  name:         string;
-  city:         string | null;
-  rating:       number | null;
-  review_count: number | null;
-  niche:        string;
+function detectCategory(lead: Lead): BusinessCategory {
+  const source = `${lead.niche} ${lead.name} ${lead.batch_keyword}`.toLowerCase();
+  if (source.includes('groom')) return 'groomer';
+  if (source.includes('vet') || source.includes('clinic') || source.includes('hospital')) return 'vet';
+  return 'unknown';
 }
 
-function ctx(lead: Lead): LeadCtx {
+function serviceLabel(category: BusinessCategory): string {
+  if (category === 'groomer') return 'pet grooming business';
+  if (category === 'vet') return 'pet clinic';
+  return 'pet business';
+}
+
+function offerLabel(category: BusinessCategory): string {
+  if (category === 'groomer') return 'Google Business Profile plus website setup for grooming bookings';
+  if (category === 'vet') return 'Google Business Profile plus website setup for clinic enquiries';
+  return 'Google Business Profile plus website setup';
+}
+
+function cityLabel(lead: Lead): string {
+  return lead.city?.trim() || 'your area';
+}
+
+function ratingLabel(lead: Lead): string {
+  const rating = lead.rating ?? 0;
+  const reviews = lead.review_count ?? 0;
+  return `${rating.toFixed(1)} stars from ${reviews} reviews`;
+}
+
+function whatsappText(lead: Lead, category: BusinessCategory): string {
+  const city = cityLabel(lead);
+  const label = ratingLabel(lead);
+  const business = serviceLabel(category);
+  const message =
+    `Hi ${lead.name}, I noticed your ${business} in ${city} has ${label}. ` +
+    `We help high-rated pet businesses turn Google visitors into bookings with a simple website and GBP improvements. Interested?`;
+  return message.length <= 160 ? message : message.slice(0, 157).trimEnd() + '...';
+}
+
+function emailSubject(lead: Lead, category: BusinessCategory): string {
+  const prefix = category === 'groomer' ? 'More grooming bookings' : 'More pet enquiries';
+  const subject = `${prefix} for ${lead.name}`;
+  return subject.length <= 60 ? subject : subject.slice(0, 57).trimEnd() + '...';
+}
+
+function emailBody(lead: Lead, category: BusinessCategory): string {
+  const city = cityLabel(lead);
+  const label = ratingLabel(lead);
+  const offer = offerLabel(category);
+
+  return [
+    `Hi ${lead.name},`,
+    ``,
+    `I came across your listing in ${city} and saw that you already have ${label}, which is a strong sign that people trust your business.`,
+    `Businesses like yours often lose potential bookings when customers cannot quickly view services, timings, pricing, or contact details on a dedicated site.`,
+    `We help pet businesses with ${offer}, designed to turn profile views into more calls, WhatsApp messages, and appointments.`,
+    `If you want, I can share a simple outline of what this could look like for ${lead.name}.`,
+  ].join('\n');
+}
+
+function generate(lead: Lead): OutreachResult {
+  const category = detectCategory(lead);
   return {
-    name:         lead.name,
-    city:         lead.city,
-    rating:       lead.rating,
-    review_count: lead.review_count,
-    niche:        lead.niche,
+    whatsapp: whatsappText(lead, category),
+    email: {
+      subject: emailSubject(lead, category),
+      body: emailBody(lead, category),
+    },
   };
 }
 
-// ─── Prompts ──────────────────────────────────────────────────────────────────
-
-// System prompt is identical for every lead → cache it with cache_control.
-// On the second lead onwards, this block is served from cache (~0.1× cost).
-const SYSTEM_TEXT =
-  `You are a specialist copywriter for a local SEO agency targeting high-rated ` +
-  `veterinary clinics and pet groomers in India that lack websites. ` +
-  `Write concise, conversion-focused WhatsApp and email outreach for a ` +
-  `GBP (Google Business Profile) + website bundle pitch. ` +
-  `Use only the facts given. Do not invent names, awards, or claims.`;
-
-function userPrompt(lead: Lead): string {
-  return (
-    `Lead data: ${JSON.stringify(ctx(lead))}\n\n` +
-    `Return ONLY valid JSON — no markdown fences, no explanation:\n` +
-    `{"whatsapp":"<≤160 chars, reference rating & reviews>",` +
-    `"email":{"subject":"<≤60 chars>","body":"<3–4 sentences>"}}`
-  );
-}
-
-// ─── Claude call ──────────────────────────────────────────────────────────────
-
-interface OutreachResult {
-  whatsapp: string;
-  email: { subject: string; body: string };
-}
-
-async function generate(lead: Lead): Promise<OutreachResult> {
-  const response = await anthropic.messages.create({
-    model:      MODEL,
-    max_tokens: 512,
-    system: [
-      {
-        type:          'text',
-        text:          SYSTEM_TEXT,
-        cache_control: { type: 'ephemeral' },   // cached for ~5 min across all leads
-      },
-    ],
-    messages: [{ role: 'user', content: userPrompt(lead) }],
-  });
-
-  const raw  = response.content[0].type === 'text' ? response.content[0].text.trim() : '';
-  // Strip markdown fences if present (defensive)
-  const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  return JSON.parse(json) as OutreachResult;
-}
-
-// ─── CSV helpers ──────────────────────────────────────────────────────────────
-
-type CsvRow = { lead_id: number; channel: string; subject: string; message: string };
-
-function esc(v: string): string {
-  return v.includes(',') || v.includes('"') || v.includes('\n')
-    ? `"${v.replace(/"/g, '""')}"`
-    : v;
+function esc(value: string): string {
+  return value.includes(',') || value.includes('"') || value.includes('\n')
+    ? `"${value.replace(/"/g, '""')}"`
+    : value;
 }
 
 function writeCsv(rows: CsvRow[], filePath: string): void {
   const header = 'lead_id,channel,subject,message';
-  const lines  = rows.map(r =>
-    [esc(String(r.lead_id)), esc(r.channel), esc(r.subject), esc(r.message)].join(',')
+  const lines = rows.map(row =>
+    [esc(String(row.lead_id)), esc(row.channel), esc(row.subject), esc(row.message)].join(','),
   );
+
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, [header, ...lines].join('\n'), 'utf-8');
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
-
 async function main(): Promise<void> {
-  console.log(`=== Outreach Generator (model: ${MODEL}) ===`);
+  console.log('=== Outreach Generator (local templates) ===');
   initDb();
 
   const leads = getTopScoredLeads(TOP_N);
@@ -129,39 +129,23 @@ async function main(): Promise<void> {
 
   for (let i = 0; i < leads.length; i++) {
     const lead = leads[i];
-    process.stdout.write(`[${i + 1}/${leads.length}] ${lead.name} (score ${lead.score}) … `);
+    const result = generate(lead);
 
-    try {
-      const result = await generate(lead);
+    console.log(`[${i + 1}/${leads.length}] ${lead.name} (score ${lead.score})`);
+    console.log(`\n  WhatsApp:\n  ${result.whatsapp}`);
+    console.log(`\n  Email subject: ${result.email.subject}`);
+    console.log(`  Email body:\n  ${result.email.body.replace(/\n/g, '\n  ')}\n`);
+    console.log('  ' + '-'.repeat(68));
 
-      // Track cache hits for transparency
-      // (cache_read_input_tokens > 0 means system prompt was served from cache)
-
-      console.log('done');
-
-      // ── Console output ──
-      console.log(`\n  📱 WhatsApp:\n  ${result.whatsapp}`);
-      console.log(`\n  📧 Email subject: ${result.email.subject}`);
-      console.log(`  📧 Email body:\n  ${result.email.body.replace(/\n/g, '\n  ')}\n`);
-      console.log('  ' + '─'.repeat(68));
-
-      csvRows.push(
-        { lead_id: lead.id, channel: 'whatsapp', subject: '',                      message: result.whatsapp         },
-        { lead_id: lead.id, channel: 'email',    subject: result.email.subject,    message: result.email.body       },
-      );
-    } catch (err) {
-      console.log(`ERROR — ${(err as Error).message}`);
-    }
-
-    // Small delay to stay within rate limits
-    if (i < leads.length - 1) await new Promise(r => setTimeout(r, 500));
+    csvRows.push(
+      { lead_id: lead.id, channel: 'whatsapp', subject: '', message: result.whatsapp },
+      { lead_id: lead.id, channel: 'email', subject: result.email.subject, message: result.email.body },
+    );
   }
 
-  if (csvRows.length > 0) {
-    writeCsv(csvRows, OUT_FILE);
-    console.log(`\nCSV written → ${OUT_FILE}`);
-    console.log(`Rows: ${csvRows.length} (${csvRows.length / 2} leads × 2 channels)`);
-  }
+  writeCsv(csvRows, OUT_FILE);
+  console.log(`\nCSV written -> ${OUT_FILE}`);
+  console.log(`Rows: ${csvRows.length} (${csvRows.length / 2} leads x 2 channels)`);
 }
 
 main().catch(err => {

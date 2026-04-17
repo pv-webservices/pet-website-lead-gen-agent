@@ -7,6 +7,7 @@ export interface ApifyPlaceResult {
   city:         string | null;
   phone:        string | null;
   rating:       number | null;
+  totalScore?:  number | null;
   reviewsCount: number | null;
   website:      string | null;
   categoryName: string | null;

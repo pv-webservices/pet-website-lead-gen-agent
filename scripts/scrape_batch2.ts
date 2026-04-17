@@ -1,61 +1,80 @@
 import { ApifyClient } from 'apify-client';
-import { APIFY_TOKEN, ACTOR_ID, DELHI_NCR_LOCATION, MAX_PLACES_PER_SEARCH } from '../src/config';
+import { APIFY_TOKEN, ACTOR_ID, MAX_PLACES_PER_SEARCH, MIN_RATING, MIN_REVIEWS } from '../src/config';
 import { initDb, insertOrIgnoreLead, getLeadStats } from '../src/db';
 import type { ApifyPlaceResult, InsertLeadPayload } from '../src/types';
 
-// ─── Vet-specific queries for Delhi NCR ─────────────────────────────────────
+type Niche = 'groomer' | 'vet';
 
-const VET_QUERIES: string[] = [
-  'veterinary clinic South Delhi',
-  'vet clinic South Delhi',
-  'animal hospital South Delhi',
-  'pet clinic South Delhi',
-  'veterinary doctor Delhi',
+interface ScrapeJob {
+  query: string;
+  location: string;
+  niche: Niche;
+}
+
+const SCRAPE_JOBS: ScrapeJob[] = [
+  { query: 'pet groomer',       location: 'Delhi, India',                 niche: 'groomer' },
+  { query: 'dog groomer',       location: 'Delhi, India',                 niche: 'groomer' },
+  { query: 'pet salon',         location: 'Delhi, India',                 niche: 'groomer' },
+  { query: 'veterinary clinic', location: 'Delhi, India',                 niche: 'vet' },
+  { query: 'animal hospital',   location: 'Delhi, India',                 niche: 'vet' },
+  { query: 'pet groomer',       location: 'Gurugram, Haryana, India',     niche: 'groomer' },
+  { query: 'dog groomer',       location: 'Gurugram, Haryana, India',     niche: 'groomer' },
+  { query: 'veterinary clinic', location: 'Gurugram, Haryana, India',     niche: 'vet' },
+  { query: 'animal hospital',   location: 'Gurugram, Haryana, India',     niche: 'vet' },
+  { query: 'pet groomer',       location: 'Noida, Uttar Pradesh, India',  niche: 'groomer' },
+  { query: 'dog groomer',       location: 'Noida, Uttar Pradesh, India',  niche: 'groomer' },
+  { query: 'veterinary clinic', location: 'Noida, Uttar Pradesh, India',  niche: 'vet' },
+  { query: 'animal hospital',   location: 'Noida, Uttar Pradesh, India',  niche: 'vet' },
 ];
-
-const MIN_RATING  = 4.5;
-const MIN_REVIEWS = 100;
-
-// ─── Apify client ────────────────────────────────────────────────────────────
 
 const client = new ApifyClient({ token: APIFY_TOKEN });
 
-// ─── Filter ──────────────────────────────────────────────────────────────────
-
-function passesFilter(place: ApifyPlaceResult): boolean {
-  const rating      = place.rating       ?? 0;
-  const reviewCount = place.reviewsCount ?? 0;   // user_ratings_total in Maps API
-  const noWebsite   = !place.website || place.website.trim() === '';
-  return rating >= MIN_RATING && reviewCount >= MIN_REVIEWS && noWebsite;
+function getRating(place: ApifyPlaceResult): number {
+  return place.rating ?? place.totalScore ?? 0;
 }
 
-// ─── Transform ───────────────────────────────────────────────────────────────
+function hasNoWebsite(place: ApifyPlaceResult): boolean {
+  return !place.website || place.website.trim() === '';
+}
 
-function toPayload(place: ApifyPlaceResult, query: string): InsertLeadPayload {
+function passesFilter(place: ApifyPlaceResult): boolean {
+  const rating = getRating(place);
+  const reviewCount = place.reviewsCount ?? 0;
+  return rating >= MIN_RATING && reviewCount >= MIN_REVIEWS && hasNoWebsite(place);
+}
+
+function inferCity(place: ApifyPlaceResult, fallbackLocation: string): string | null {
+  if (place.city?.trim()) return place.city.trim();
+  const address = place.address?.toLowerCase() ?? '';
+  if (address.includes('gurugram') || address.includes('gurgaon')) return 'Gurugram';
+  if (address.includes('noida')) return 'Noida';
+  if (address.includes('delhi') || address.includes('new delhi')) return 'Delhi';
+  return fallbackLocation.split(',')[0]?.trim() ?? null;
+}
+
+function toPayload(place: ApifyPlaceResult, job: ScrapeJob): InsertLeadPayload {
   return {
     place_id:      place.placeId,
     name:          place.title,
-    address:       place.address       ?? null,
-    city:          place.city          ?? null,
+    address:       place.address ?? null,
+    city:          inferCity(place, job.location),
     lat:           place.location?.lat ?? null,
     lng:           place.location?.lng ?? null,
-    rating:        place.rating        ?? null,
-    review_count:  place.reviewsCount  ?? null,
-    website_url:   null,                          // only no-website leads reach here
-    phone:         place.phone         ?? null,
-    niche:         'vet',
-    batch_keyword: query,
+    rating:        place.rating ?? place.totalScore ?? null,
+    review_count:  place.reviewsCount ?? null,
+    website_url:   place.website?.trim() || null,
+    phone:         place.phone ?? null,
+    niche:         job.niche,
+    batch_keyword: `${job.query} | ${job.location}`,
   };
 }
 
-// ─── Per-query scrape ────────────────────────────────────────────────────────
-
-async function scrapeQuery(query: string): Promise<{ fetched: number; inserted: number }> {
-  console.log(`\n[scrape] "${query}"`);
+async function scrapeJob(job: ScrapeJob): Promise<{ fetched: number; qualified: number; inserted: number }> {
+  console.log(`\n[scrape] Query="${job.query}" | Location="${job.location}" | Niche=${job.niche}`);
 
   const run = await client.actor(ACTOR_ID).call({
-    searchStringsArray:        [query],
-    locationQuery:             DELHI_NCR_LOCATION,
+    searchStringsArray:        [job.query],
+    locationQuery:             job.location,
     maxCrawledPlacesPerSearch: MAX_PLACES_PER_SEARCH,
     language:                  'en',
     scrapeSocialMediaProfiles: {
@@ -68,50 +87,49 @@ async function scrapeQuery(query: string): Promise<{ fetched: number; inserted: 
   });
 
   const { items } = await client.dataset(run.defaultDatasetId).listItems();
-  const places    = items as unknown as ApifyPlaceResult[];
-  console.log(`         fetched: ${places.length}`);
-
+  const places = items as unknown as ApifyPlaceResult[];
   const qualified = places.filter(passesFilter);
-  console.log(`         qualified (rating≥${MIN_RATING}, reviews≥${MIN_REVIEWS}, no website): ${qualified.length}`);
+
+  console.log(`[scrape]   fetched=${places.length} qualified=${qualified.length}`);
 
   let inserted = 0;
   for (const place of qualified) {
-    if (insertOrIgnoreLead(toPayload(place, query))) inserted++;
+    if (insertOrIgnoreLead(toPayload(place, job))) inserted++;
   }
-  console.log(`         inserted: ${inserted}  (${qualified.length - inserted} duplicates skipped)`);
 
-  return { fetched: places.length, inserted };
+  console.log(`[scrape]   inserted=${inserted} duplicates_skipped=${qualified.length - inserted}`);
+  return { fetched: places.length, qualified: qualified.length, inserted };
 }
 
-// ─── Main ────────────────────────────────────────────────────────────────────
-
 async function main(): Promise<void> {
-  console.log('=== Vet Clinic Scraper — Delhi NCR (batch 2) ===');
-  console.log(`Queries: ${VET_QUERIES.length}`);
-  console.log(`Filters: rating ≥ ${MIN_RATING} | reviews ≥ ${MIN_REVIEWS} | no website\n`);
+  console.log('=== Pet Lead Gen Scraper ===');
+  console.log(`Jobs: ${SCRAPE_JOBS.length}`);
+  console.log(`Filters: rating >= ${MIN_RATING}, reviews >= ${MIN_REVIEWS}, no website`);
 
   initDb();
 
-  let totalFetched  = 0;
+  let totalFetched = 0;
+  let totalQualified = 0;
   let totalInserted = 0;
 
-  for (const query of VET_QUERIES) {
+  for (const job of SCRAPE_JOBS) {
     try {
-      const { fetched, inserted } = await scrapeQuery(query);
-      totalFetched  += fetched;
+      const { fetched, qualified, inserted } = await scrapeJob(job);
+      totalFetched += fetched;
+      totalQualified += qualified;
       totalInserted += inserted;
-      // Polite delay between actor runs
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(resolve => setTimeout(resolve, 2000));
     } catch (err) {
-      console.error(`[scrape] ERROR on query "${query}":`, err);
+      console.error(`[scrape] ERROR on query "${job.query}" at "${job.location}":`, err);
     }
   }
 
   const stats = getLeadStats();
-  console.log('\n=== Done ===');
-  console.log(`Raw results fetched : ${totalFetched}`);
-  console.log(`New leads inserted  : ${totalInserted}`);
-  console.log(`DB totals — total: ${stats.total} | new: ${stats.new} | scored: ${stats.scored}`);
+  console.log('\n=== Scrape Complete ===');
+  console.log(`Raw places fetched : ${totalFetched}`);
+  console.log(`Qualified leads    : ${totalQualified}`);
+  console.log(`New leads inserted : ${totalInserted}`);
+  console.log(`DB totals - total: ${stats.total}, new: ${stats.new}, scored: ${stats.scored}`);
 }
 
 main().catch(err => {
