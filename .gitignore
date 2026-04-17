@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.claude/
+pet-website-lead-gen-agent/
+db/leads.db
+db/*.db-wal
+db/*.db-shm
+data/
