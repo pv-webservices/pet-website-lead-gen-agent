@@ -47,7 +47,13 @@ async function scrapeKeyword(keyword: string): Promise<number> {
     locationQuery:             DELHI_NCR_LOCATION,
     maxCrawledPlacesPerSearch: MAX_PLACES_PER_SEARCH,
     language:                  'en',
-    scrapeSocialMediaProfiles: false,
+    scrapeSocialMediaProfiles: {
+      facebooks:  false,
+      instagrams: false,
+      youtubes:   false,
+      tiktoks:    false,
+      twitters:   false,
+    },
   });
 
   const { items } = await client.dataset(run.defaultDatasetId).listItems();
