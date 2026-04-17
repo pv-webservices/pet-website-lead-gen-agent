@@ -3,8 +3,7 @@ import * as path from 'path';
 import * as dotenv from 'dotenv';
 import {
   initDb,
-  getScoredLeads,
-  getLeadsWithOutreachIds,
+  getScoredLeadsWithoutOutreach,
   insertOutreachMessage,
 } from '../src/db';
 import type { Lead, BusinessCategory } from '../src/types';
@@ -79,12 +78,10 @@ function appendCsvRows(rows: string[][]): void {
 async function main(): Promise<void> {
   initDb();
 
-  const candidates = getScoredLeads(LIMIT);
-  const doneIds    = getLeadsWithOutreachIds();
-  const leads      = candidates.filter(l => !doneIds.has(l.id));
+  const leads = getScoredLeadsWithoutOutreach(LIMIT);
 
   console.log(`=== Outreach Generator (templates) ===`);
-  console.log(`Scored leads fetched: ${candidates.length} | Already processed: ${doneIds.size} | To process: ${leads.length}\n`);
+  console.log(`Scored leads without outreach (up to ${LIMIT}): ${leads.length}\n`);
 
   if (leads.length === 0) {
     console.log('Nothing to process. All scored leads already have outreach messages.');

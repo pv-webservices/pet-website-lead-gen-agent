@@ -5,7 +5,11 @@
   "scripts": {
     "db:init":           "tsx scripts/db_init.ts",
     "scrape":            "tsx scripts/scrape_batch2.ts",
+    "scrape:vets":       "tsx scripts/scrape_vets_batch.ts",
+    "scrape:vets:mumbai":      "tsx scripts/scrape_vets_mumbai.ts",
+    "scrape:groomers:mumbai":  "tsx scripts/scrape_groomers_mumbai.ts",
     "score":             "tsx scripts/score_leads.ts",
+    "score:leads":       "tsx scripts/score_leads.ts",
     "outreach":          "tsx scripts/generate_outreach.ts",
     "export:leads":      "tsx scripts/export_leads_to_file.ts",
     "outreach:generate": "tsx scripts/generate_outreach_for_leads.ts",

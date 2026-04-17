@@ -171,6 +171,23 @@ export function getLeadsWithOutreachIds(): Set<number> {
   return new Set(rows.map(r => r.lead_id));
 }
 
+/**
+ * Scored leads that have NO outreach_messages rows yet, up to limit.
+ * Applies LIMIT to unprocessed leads only — avoids the getScoredLeads+filter
+ * pattern that silently skips leads when LIMIT < total scored count.
+ */
+export function getScoredLeadsWithoutOutreach(limit: number): Lead[] {
+  return getDb().prepare(`
+    SELECT l.* FROM leads l
+    WHERE l.status = 'scored'
+      AND NOT EXISTS (
+        SELECT 1 FROM outreach_messages om WHERE om.lead_id = l.id
+      )
+    ORDER BY l.score DESC
+    LIMIT @limit
+  `).all({ limit } as unknown as SqlParams) as unknown as Lead[];
+}
+
 /** Insert a single outreach message row. */
 export function insertOutreachMessage(row: OutreachMessageInsert): void {
   getDb().prepare(`
