@@ -8,6 +8,8 @@
     "scrape:vets":       "tsx scripts/scrape_vets_batch.ts",
     "scrape:vets:mumbai":      "tsx scripts/scrape_vets_mumbai.ts",
     "scrape:groomers:mumbai":  "tsx scripts/scrape_groomers_mumbai.ts",
+    "scrape:vets:pune":        "tsx scripts/scrape_vets_pune.ts",
+    "scrape:groomers:pune":    "tsx scripts/scrape_groomers_pune.ts",
     "score":             "tsx scripts/score_leads.ts",
     "score:leads":       "tsx scripts/score_leads.ts",
     "outreach":          "tsx scripts/generate_outreach.ts",
