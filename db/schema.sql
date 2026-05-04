@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS leads (
   score        INTEGER  NOT NULL DEFAULT 0,
   tier         TEXT,
   outreach_message TEXT,
+  instagram    TEXT,
+  whatsapp_link TEXT,
   status       TEXT     NOT NULL DEFAULT 'new'
                CHECK(status IN ('new', 'scored', 'outreach_ready', 'contacted', 'converted', 'rejected')),
   created_at   TEXT     NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

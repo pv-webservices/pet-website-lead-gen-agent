@@ -16,6 +16,8 @@
     "export:leads":      "tsx scripts/export_leads_to_file.ts",
     "outreach:generate": "tsx scripts/generate_outreach_for_leads.ts",
     "sheet:push":        "tsx scripts/push_to_google_sheet.ts",
+    "scrape:uae":        "tsx scripts/scrape_uae_tier_a.ts",
+    "sheet:push:uae":    "tsx scripts/push_uae_to_google_sheet.ts",
     "build":             "tsc"
   },
   "dependencies": {

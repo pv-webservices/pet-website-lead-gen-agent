@@ -38,17 +38,20 @@ export function initDb(): void {
 const INSERT_SQL = `
   INSERT OR IGNORE INTO leads
     (place_id, name, address, city, lat, lng, rating, review_count,
-     website_url, phone, niche, batch_keyword)
+     website_url, phone, niche, batch_keyword, instagram, whatsapp_link)
   VALUES
     (@place_id, @name, @address, @city, @lat, @lng, @rating, @review_count,
-     @website_url, @phone, @niche, @batch_keyword)
+     @website_url, @phone, @niche, @batch_keyword, @instagram, @whatsapp_link)
 `;
 
 /** Insert a single lead, silently skipping if place_id already exists. */
 export function insertOrIgnoreLead(payload: InsertLeadPayload): boolean {
-  const result = getDb().prepare(INSERT_SQL).run(payload as unknown as SqlParams);
+  const normalized = { instagram: null, whatsapp_link: null, ...payload };
+  const result = getDb().prepare(INSERT_SQL).run(normalized as unknown as SqlParams);
   return (result.changes as number) > 0;
 }
+
+/** Batch insert — all in one transaction. Returns count of newly inserted rows. */
 
 /** Batch insert — all in one transaction. Returns count of newly inserted rows. */
 export function insertLeadsBatch(payloads: InsertLeadPayload[]): number {
@@ -58,7 +61,8 @@ export function insertLeadsBatch(payloads: InsertLeadPayload[]): number {
   db.exec('BEGIN');
   try {
     for (const p of payloads) {
-      inserted += (stmt.run(p as unknown as SqlParams).changes as number);
+      const norm = { instagram: null, whatsapp_link: null, ...p };
+      inserted += (stmt.run(norm as unknown as SqlParams).changes as number);
     }
     db.exec('COMMIT');
   } catch (err) {
@@ -247,4 +251,19 @@ export function getLeadStats(): {
     scored:         row['scored_count'],
     outreach_ready: row['outreach_count'],
   };
+}
+
+// ─── UAE Queries ──────────────────────────────────────────────────────────────
+
+/**
+ * Returns all UAE Tier A leads (identified by batch_keyword containing 'UAE').
+ * These are inserted by scrape_uae_tier_a.ts with tier forced to 'A'.
+ * Ordered by name for stable spreadsheet output.
+ */
+export function getUaeLeads(): Lead[] {
+  return getDb().prepare(`
+    SELECT * FROM leads
+    WHERE batch_keyword LIKE '%UAE%'
+    ORDER BY niche, name
+  `).all() as unknown as Lead[];
 }

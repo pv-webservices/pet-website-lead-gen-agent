@@ -61,3 +61,35 @@ export const SCORE_WEIGHTS = {
 
 export const REVIEW_SCORE_CEILING = 500;
 export const RATING_MAX           = 5.0;
+
+// ─── UAE Tier A Config ────────────────────────────────────────────────────────
+
+export const UAE_MIN_RATING  = 4.3;
+export const UAE_MIN_REVIEWS = 50;
+
+/** Add more cities here to extend coverage - no other code change needed. */
+const UAE_CITIES: Array<{ location: string; city: string }> = [
+  { location: 'Dubai, UAE', city: 'Dubai' },
+  // { location: 'Abu Dhabi, UAE', city: 'Abu Dhabi' },
+  // { location: 'Sharjah, UAE', city: 'Sharjah' },
+];
+
+type UaeNiche = 'groomer' | 'vet';
+
+interface UaeScrapeJob {
+  query:    string;
+  location: string;
+  city:     string;
+  niche:    UaeNiche;
+}
+
+const UAE_QUERIES: Array<{ query: string; niche: UaeNiche }> = [
+  { query: 'pet groomer',        niche: 'groomer' },
+  { query: 'pet salon',          niche: 'groomer' },
+  { query: 'veterinary clinic',  niche: 'vet' },
+  { query: 'animal hospital',    niche: 'vet' },
+];
+
+export const UAE_TIER_A_JOBS: UaeScrapeJob[] = UAE_CITIES.flatMap(({ location, city }) =>
+  UAE_QUERIES.map(({ query, niche }) => ({ query, location, city, niche })),
+);

@@ -38,6 +38,8 @@ export interface Lead {
   score:            number;
   tier:             string | null;
   outreach_message: string | null;
+  instagram:        string | null;
+  whatsapp_link:    string | null;
   status:           LeadStatus;
   created_at:       string;
   updated_at:       string;
@@ -55,8 +57,12 @@ export type LeadStatus =
 
 export type InsertLeadPayload = Omit<
   Lead,
-  'id' | 'score' | 'tier' | 'outreach_message' | 'status' | 'created_at' | 'updated_at'
->;
+  | 'id' | 'score' | 'tier' | 'outreach_message' | 'status' | 'created_at' | 'updated_at'
+  | 'instagram' | 'whatsapp_link'
+> & {
+  instagram?:     string | null;
+  whatsapp_link?: string | null;
+};
 
 export interface ScoreUpdatePayload {
   place_id: string;
